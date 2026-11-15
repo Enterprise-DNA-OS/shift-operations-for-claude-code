@@ -1,13 +1,57 @@
 [
   {
-    "name": "week",
-    "title": "This week",
-    "subtitle": "Shift Operations for Claude Code: what needs attention, rendered by npm run view",
+    "name": "control-room",
+    "title": "Control room board",
+    "subtitle": "Shift Operations for Claude Code: who is on shift, what is bypassed, what is in force, what needs a decision",
     "sections": [
       {
-        "title": "Needs attention",
-        "note": "TODO(author): point this at the industry's attention view (overdue, stuck, quiet).",
-        "sql": "select 'replace me' as item, 'TODO(author)' as why"
+        "title": "Needs a decision",
+        "note": "Everything on the attention list, worst first.",
+        "sql": "select case reason when 'notifiable' then '01 Notifiable event, regulator not told' when 'bypass_overdue' then '02 Bypass past its authority' when 'sol_excursion' then '03 Outside safe operating limit' when 'handover_open' then '04 Handover open' when 'competency' then '05 Worked without a sign-off' when 'fatigue' then '06 Fatigue limit passed' when 'round_missed' then '07 Round missed' when 'unexplained' then '08 Excursion not logged' when 'unacked' then '09 Standing order not read' when 'order_expired' then '10 Standing order expired' else '11 Action overdue' end as what, coalesce(area, '') as area, label as record, detail from v_attention order by rank, since"
+      },
+      {
+        "title": "On shift now",
+        "sql": "select area, ref as shift, kind, crew, lead, to_char(starts_at, 'DD Mon HH24:MI') as from_time, to_char(ends_at, 'DD Mon HH24:MI') as to_time, entries from v_shifts where starts_at <= plant_now() and ends_at > plant_now() order by area"
+      },
+      {
+        "title": "Bypassed or inhibited now",
+        "note": "Every one of these is on every handover until it is restored.",
+        "sql": "select ref as bypass, area, tag, replace(kind, '_', ' ') as kind, case when safety_critical then 'yes' else '' end as safety_critical, description, authorised_by, hours_on, to_char(authorised_until, 'DD Mon HH24:MI') || case when overdue then ' OVERDUE' else '' end as authorised_until from v_bypasses where active order by overdue desc, safety_critical desc"
+      },
+      {
+        "title": "Standing orders in force",
+        "sql": "select o.ref as standing_order, o.area, o.title, o.issued_by, o.expires_on::text || case when o.expired then ' EXPIRED' else '' end as expires, (select count(*) from v_unacked u where u.order_id = o.id) as worked_without_reading from v_standing_orders o where o.status = 'active' order by o.ref"
+      },
+      {
+        "title": "Carried forward",
+        "sql": "select ref as entry, area, to_char(logged_at, 'DD Mon HH24:MI') as logged, coalesce(equipment_tag, '') as tag, title from v_entries where open_carry order by logged_at"
+      }
+    ]
+  },
+  {
+    "name": "operations-week",
+    "title": "The operations week",
+    "subtitle": "Shift Operations for Claude Code: handovers, rounds, limits and people over the last seven days",
+    "sections": [
+      {
+        "title": "Handovers by area",
+        "sql": "select area, count(*) as shifts_ended, count(*) filter (where handover = 'accepted') as accepted_on_time, count(*) filter (where handover = 'late') as accepted_late, count(*) filter (where handover in ('missing', 'not accepted')) as open_or_missing from v_shifts where ends_at > plant_now() - interval '7 days' and ends_at <= plant_now() group by area order by area"
+      },
+      {
+        "title": "Rounds by route",
+        "sql": "select route, count(*) filter (where state in ('done', 'late', 'missed')) as due, count(*) filter (where state = 'done') as on_time, count(*) filter (where state = 'late') as late, count(*) filter (where state = 'missed') as missed from v_rounds where due_at > plant_now() - interval '7 days' group by route order by route"
+      },
+      {
+        "title": "Readings outside limits",
+        "sql": "select to_char(recorded_at, 'DD Mon HH24:MI') as at, area, tag, description, value, unit, case when band = 'sol' then 'safe operating limit' else 'alarm band' end as band, coalesce(explained_by, 'NOT LOGGED') as logged from v_excursions where recorded_at > plant_now() - interval '7 days' order by recorded_at desc"
+      },
+      {
+        "title": "Trips, safety and environmental entries",
+        "sql": "select ref as entry, area, to_char(logged_at, 'DD Mon HH24:MI') as logged, category, title, case when notifiable then coalesce('notified ' || regulator_ref, 'NOT NOTIFIED') else '' end as regulator from v_entries where logged_at > plant_now() - interval '7 days' and category in ('trip', 'safety', 'environmental') order by logged_at desc"
+      },
+      {
+        "title": "People: sign-offs and fatigue",
+        "sql": "select f.person, f.crew, f.hours_7_days, f.consecutive_shifts, f.min_rest_hours as least_rest_hours, coalesce((select string_agg(distinct g.area || ' ' || g.why, '; ') from v_competency_gaps g where g.person = f.person and g.starts_at > plant_now() - interval '7 days' and g.starts_at <= plant_now()), '') as sign_off_gaps from v_fatigue f where f.hours_7_days > 0 order by f.hours_7_days desc, f.person"
       }
     ]
   }

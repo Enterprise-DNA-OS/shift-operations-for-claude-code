@@ -1,11 +1,85 @@
 [
   {
-    "name": "example",
-    "title": "TODO(author): the first document this industry must produce",
-    "for_each": "select gen_random_uuid() as id, 'Example' as name",
+    "name": "shift-handover",
+    "title": "Shift handover",
+    "for_each": "select h.id, s.ref || ' ' || a.code || ' ' || s.kind as name from handovers h join shifts s on s.id = h.shift_id join areas a on a.id = s.area_id where s.ends_at > plant_now() - interval '3 days' order by s.ends_at desc",
     "file": "name",
     "sections": [
-      { "title": "Details", "sql": "select 'replace me' as item, $1::text as record_id" }
+      {
+        "title": "Shift",
+        "layout": "record",
+        "sql": "select s.ref as shift, a.name as area, s.kind, s.crew, to_char(s.starts_at, 'DD Mon YYYY HH24:MI') as from_time, to_char(s.ends_at, 'DD Mon YYYY HH24:MI') as to_time, gb.name as handed_over_by, to_char(h.given_at, 'DD Mon HH24:MI') as given_at, coalesce(ab.name, 'NOT ACCEPTED') as accepted_by, coalesce(to_char(h.accepted_at, 'DD Mon HH24:MI'), '') as accepted_at, case when h.face_to_face then 'yes' else 'no' end as face_to_face, coalesce(h.summary, '') as summary from handovers h join shifts s on s.id = h.shift_id join areas a on a.id = s.area_id join people gb on gb.id = h.given_by left join people ab on ab.id = h.accepted_by where h.id = $1"
+      },
+      {
+        "title": "Bypassed or inhibited at handover",
+        "sql": "select b.ref as bypass, b.tag, replace(b.kind, '_', ' ') as kind, case when b.safety_critical then 'yes' else '' end as safety_critical, b.description, to_char(b.authorised_until, 'DD Mon HH24:MI') as authorised_until from handovers h join bypasses b on (h.items->'bypasses') @> jsonb_build_array(b.ref) where h.id = $1 order by b.ref"
+      },
+      {
+        "title": "Standing orders in force",
+        "sql": "select so.ref as standing_order, so.title, so.expires_on from handovers h join standing_orders so on (h.items->'standing_orders') @> jsonb_build_array(so.ref) where h.id = $1 order by so.ref"
+      },
+      {
+        "title": "Carried forward",
+        "sql": "select le.ref as entry, to_char(le.logged_at, 'DD Mon HH24:MI') as logged, coalesce(le.equipment_tag, '') as tag, le.title from handovers h join log_entries le on (h.items->'carry_forward') @> jsonb_build_array(le.ref) where h.id = $1 order by le.logged_at"
+      },
+      {
+        "title": "The shift's logbook",
+        "sql": "select le.ref as entry, to_char(le.logged_at, 'HH24:MI') as time, le.category, coalesce(le.equipment_tag, '') as tag, le.title, coalesce(p.name, '') as by_person from handovers h join log_entries le on le.shift_id = h.shift_id left join people p on p.id = le.person_id where h.id = $1 order by le.logged_at"
+      }
+    ]
+  },
+  {
+    "name": "standing-order",
+    "title": "Standing order",
+    "for_each": "select id, ref || ' ' || title as name from standing_orders where status = 'active' order by ref",
+    "file": "name",
+    "sections": [
+      {
+        "title": "Order",
+        "layout": "record",
+        "sql": "select ref as standing_order, area, title, instruction, issued_by, coalesce(approved_by, '') as approved_by, to_char(effective_from, 'DD Mon YYYY HH24:MI') as in_force_from, to_char(expires_on, 'DD Mon YYYY') as expires from v_standing_orders where id = $1"
+      },
+      {
+        "title": "Acknowledged by",
+        "sql": "select p.name as person, to_char(k.acked_at, 'DD Mon YYYY HH24:MI') as acknowledged from order_acks k join people p on p.id = k.person_id where k.standing_order_id = $1 order by k.acked_at"
+      },
+      {
+        "title": "Worked the area without acknowledging it",
+        "sql": "select person, shifts_since as shifts, to_char(first_shift_since, 'DD Mon HH24:MI') as first_shift from v_unacked where order_id = $1 order by person"
+      }
+    ]
+  },
+  {
+    "name": "notifiable-event",
+    "title": "Notifiable event record",
+    "for_each": "select id, ref || ' ' || area as name from v_entries where notifiable order by logged_at desc",
+    "file": "name",
+    "sections": [
+      {
+        "title": "Event",
+        "layout": "record",
+        "sql": "select e.ref as record, (select value from settings where key = 'business_name') as business, a.name as area, to_char(e.logged_at, 'DD Mon YYYY HH24:MI') as date_and_time, coalesce(e.equipment_tag, '') as equipment, e.title as what_happened, coalesce(e.body, '') as detail, case when e.injury then 'yes' else 'no' end as injury, coalesce(p.name, '') as logged_by, coalesce(to_char(e.notified_at, 'DD Mon YYYY HH24:MI'), 'NOT YET NOTIFIED') as regulator_notified, coalesce(e.regulator_ref, '') as regulator_reference, coalesce(to_char(e.site_preserved_until, 'DD Mon HH24:MI'), '') as site_preserved_until from log_entries e join areas a on a.id = e.area_id left join people p on p.id = e.person_id where e.id = $1"
+      },
+      {
+        "title": "Actions",
+        "sql": "select ac.ref as action, ac.title, coalesce(p.name, '') as owner, ac.due_on, ac.status from actions ac left join people p on p.id = ac.owner_id where ac.log_entry_id = $1 order by ac.ref"
+      }
+    ]
+  },
+  {
+    "name": "bypass-register",
+    "title": "Bypass and inhibit register",
+    "for_each": "select id, code as name from areas where status = 'active' order by code",
+    "file": "name",
+    "sections": [
+      {
+        "title": "Active",
+        "sql": "select ref as bypass, tag, replace(kind, '_', ' ') as kind, case when safety_critical then 'yes' else '' end as safety_critical, description, reason, authorised_by, to_char(applied_at, 'DD Mon HH24:MI') as applied, to_char(authorised_until, 'DD Mon HH24:MI') || case when overdue then ' OVERDUE' else '' end as authorised_until, coalesce(risk_assessment_ref, '') as risk_assessment from v_bypasses where area_id = $1 and active order by applied_at"
+      },
+      {
+        "title": "Removed in the last 30 days",
+        "sql": "select ref as bypass, tag, replace(kind, '_', ' ') as kind, description, to_char(applied_at, 'DD Mon HH24:MI') as applied, to_char(removed_at, 'DD Mon HH24:MI') as removed, removed_by, hours_on from v_bypasses where area_id = $1 and not active and removed_at > plant_now() - interval '30 days' order by removed_at desc"
+      }
     ]
   }
 ]
